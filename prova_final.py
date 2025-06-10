@@ -1,97 +1,124 @@
 import requests
 import sqlite3
+import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-conexao = sqlite3.connect('chuck_norris.db')
-cursor = conexao.cursor()
+
+conn = sqlite3.connect('projeto_rpa.db')
+cursor = conn.cursor()
 
 
 cursor.execute('''
-    CREATE TABLE IF NOT EXISTS piadas (
-        id TEXT PRIMARY KEY,
-        piada TEXT,
-        categoria TEXT
-    )
+CREATE TABLE IF NOT EXISTS piadas_chuck (
+    id TEXT PRIMARY KEY,
+    piada TEXT,
+    categoria TEXT
+)
 ''')
 
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS dados_processados (
+    id TEXT PRIMARY KEY,
+    piada TEXT,
+    palavra_chave TEXT
+)
+''')
 
-for _ in range(10):
-    url = "https://api.chucknorris.io/jokes/random"
-    response = requests.get(url)
+conn.commit()
 
-    if response.status_code == 200:
-        data = response.json()
-        id = data['id']
-        piada = data['value']
-        categoria = ', '.join(data.get('categories', [])) or 'Sem categoria'
+def coletar_piadas(qtd=100):
+    piadas = []
+    for _ in range(qtd):
+        response = requests.get("https://api.chucknorris.io/jokes/random")
+        if response.status_code == 200:
+            data = response.json()
+            id = data['id']
+            piada = data['value']
+            categoria = data.get('categories')
+            categoria = categoria[0] if categoria else 'Sem categoria'
+            piadas.append((id, piada, categoria))
+    return piadas
 
-        print('PIADA COLETADA:')
-        print(f'ID: {id}')
-        print(f'Categoria: {categoria}')
-        print(f'Texto: {piada}')
-        print('-' * 50)
 
+def salvar_piadas(piadas):
+    for id, piada, categoria in piadas:
         cursor.execute('''
-            INSERT OR REPLACE INTO piadas (
-                id, piada, categoria
-            ) VALUES (?, ?, ?)
+            INSERT OR IGNORE INTO piadas_chuck (id, piada, categoria)
+            VALUES (?, ?, ?)
         ''', (id, piada, categoria))
-    else:
-        print('Erro ao buscar piada.')
-
-conexao.commit()
+    conn.commit()
 
 
-cursor.execute("SELECT * FROM piadas WHERE piada LIKE '%Chuck%'")
-piadas_chuck = cursor.fetchall()
+def processar_piadas():
+    cursor.execute('SELECT id, piada FROM piadas_chuck')
+    todas_piadas = cursor.fetchall()
+
+    for id, texto in todas_piadas:
+        if re.search(r'\bChuck\b', texto, re.IGNORECASE):
+            cursor.execute('''
+                INSERT OR IGNORE INTO dados_processados (id, piada, palavra_chave)
+                VALUES (?, ?, ?)
+            ''', (id, texto, 'Chuck'))
+    conn.commit()
 
 
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS piadas_chuck (
-        id TEXT PRIMARY KEY,
-        piada TEXT,
-        categoria TEXT
-    )
-''')
+def enviar_email():
+    try:
+       
+        remetente = "gbr.vianas@gmail.com"
+        senha = "cmqb vjhe tefb cbwk" 
+        destinatario = "gbr.vianas@gmail.com"
+        assunto = "Relatório - Projeto RPA (Chuck Norris)"
 
+        cursor.execute('SELECT COUNT(*) FROM piadas_chuck')
+        total_coletadas = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM dados_processados')
+        total_processadas = cursor.fetchone()[0]
+        cursor.execute('SELECT piada FROM dados_processados')
+        piadas = cursor.fetchall()
+        piadas_texto = "\n\n".join([f"- {p[0]}" for p in piadas])
 
-for piada in piadas_chuck:
-    cursor.execute('''
-        INSERT OR REPLACE INTO piadas_chuck (
-            id, piada, categoria
-        ) VALUES (?, ?, ?)
-    ''', piada)
+        corpo_email = f"""
+Relatório do Projeto RPA
 
-conexao.commit()
-conexao.close()
+Total de piadas coletadas: {total_coletadas}
+Total de piadas com a palavra "Chuck": {total_processadas}
 
+Piadas processadas:
+{piadas_texto}
+"""
 
-try:
-    print('Aguarde... seu email está sendo enviado.')
+        print("📤 Enviando e-mail...")
 
-    servidor_email = smtplib.SMTP('smtp.gmail.com', 587)
-    servidor_email.starttls()
-    servidor_email.login('gbr.vianas@gmail.com', 'cmqb vjhe tefb cbwk')  
+       
+        mensagem = MIMEMultipart()
+        mensagem['From'] = remetente
+        mensagem['To'] = destinatario
+        mensagem['Subject'] = assunto
+        mensagem.attach(MIMEText(corpo_email, 'plain'))
 
-    remetente = 'gbr.vianas@gmail.com'
-    destinatarios = ['professorvandersonbossi@gmail.com']
-    mensagem = MIMEMultipart()
-    mensagem['From'] = remetente
-    mensagem['To'] = ', '.join(destinatarios)
-    mensagem['Subject'] = 'Relatório - Piadas Chuck Norris (Projeto RPA)'
+       
+        servidor_email = smtplib.SMTP('smtp.gmail.com', 587)
+        servidor_email.starttls()
+        servidor_email.login(remetente, senha)
+        servidor_email.send_message(mensagem)
+        servidor_email.quit()
 
-    corpo = "Segue abaixo as piadas coletadas da API Chuck Norris:\n\n"
-    for piada in piadas_chuck:
-        corpo += f"- {piada[1]}\n\n"
+        print("✅ Email enviado com sucesso!")
 
-    if not piadas_chuck:
-        corpo += "Nenhuma piada com 'Chuck' foi encontrada."
+    except Exception as erro:
+        print(f"❌ Erro ao enviar o e-mail: {erro}")
 
-    mensagem.attach(MIMEText(corpo, 'plain'))
-    servidor_email.sendmail(remetente, destinatarios, mensagem.as_string())
+if __name__ == "__main__":
+    print("🔄 Coletando piadas...")
+    piadas = coletar_piadas(10)
+    salvar_piadas(piadas)
+    print("✅ Piadas salvas no banco.")
 
-    print('Email enviado com sucesso!')
-except Exception as e:
-    print(f'Erro ao enviar e-mail: {e}')
+    print("🔍 Processando com regex...")
+    processar_piadas()
+    print("✅ Dados processados salvos.")
+
+    enviar_email()
